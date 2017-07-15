@@ -27,6 +27,8 @@ import configuration
 import show_and_tell_model
 from inference_utils import vocabulary, caption_generator
 
+import pdb
+
 FLAGS = tf.app.flags.FLAGS
 
 tf.flags.DEFINE_string("input_file_pattern", "",
@@ -56,25 +58,100 @@ def main(unused_argv):
 
 	# Create training directory.
 	train_dir = FLAGS.train_dir
+	filename_saved_model = os.path.join(FLAGS.train_dir,'im2txt')
 	if not tf.gfile.IsDirectory(train_dir):
 		tf.logging.info("Creating training directory: %s", train_dir)
 		tf.gfile.MakeDirs(train_dir)
 
+	vocab = vocabulary.Vocabulary( FLAGS.vocab_file )
+
 	# Build the TensorFlow graph.
 	g = tf.Graph()
 	with g.as_default():
-		# Build the model.
+		# Build the model (teacher-forcing mode).
 		model = show_and_tell_model.ShowAndTellModel(
 				model_config, mode="train", train_inception=FLAGS.train_inception)
 		model.build()
+
+		# Build the model (free-running mode).
+		model_free = show_and_tell_model.ShowAndTellModel(
+				model_config, mode="free", vocab=vocab, reuse=True )
+		model_free.build()
 
 		# Build the model for validation with variable sharing
 		model_valid = show_and_tell_model.ShowAndTellModel(
 				model_config, mode="inference", reuse=True )
 		model_valid.build()
-		vocab = vocabulary.Vocabulary( FLAGS.vocab_file )
 
-		# Set up the learning rate.
+		# get teacher behavior
+		teacher_outputs, [teacher_state_c,teacher_state_h] = model.behavior
+		teacher_state_c = tf.expand_dims( teacher_state_c, axis=1 )
+		teacher_state_h = tf.expand_dims( teacher_state_h, axis=1 )
+
+		# get free behavior
+		free_outputs, [free_state_c,free_state_h] = model_free.behavior
+		free_state_c = tf.expand_dims( free_state_c, axis=1 )
+		free_state_h = tf.expand_dims( free_state_h, axis=1 )
+		
+		# prepare behavior to be LSTM's input
+		teacher_behavior = tf.concat( [teacher_outputs,teacher_state_c,teacher_state_h], axis=1 )
+		free_behavior = tf.concat( [free_outputs,free_state_c,free_state_h], axis=1 )
+
+		d_lstm_cell = tf.contrib.rnn.BasicLSTMCell(model_config.num_lstm_units)
+		d_lstm_cell = tf.contrib.rnn.DropoutWrapper(
+							d_lstm_cell,
+							input_keep_prob=model_config.lstm_dropout_keep_prob,
+							output_keep_prob=model_config.lstm_dropout_keep_prob)
+
+		with tf.variable_scope("discriminator") as scope_disc:
+			teacher_lengths = tf.reduce_sum( model.input_mask, 1 )
+			d_outputs_teacher, _ = tf.nn.dynamic_rnn( cell=d_lstm_cell,
+												inputs = teacher_behavior,
+												sequence_length = teacher_lengths,
+												dtype = tf.float32,
+												scope = scope_disc )
+			#d_outputs_teacher = tf.transpose( d_outputs_teacher, [1,0,2] )
+			#d_last_output_teacher = tf.gather( d_outputs_teacher, int(d_outputs_teacher.get_shape()[0])-1 )
+			d_last_output_teacher  = tf.slice( d_outputs_teacher, [0,-1,0],[-1,-1,-1] )
+			d_logits_teacher = tf.contrib.layers.fully_connected( inputs = d_last_output_teacher,
+															num_outputs = 2,
+															activation_fn = None,
+															weights_initializer = model.initializer,
+															scope = scope_disc )
+
+			scope_disc.reuse_variables()
+			free_lengths = tf.ones_like(teacher_lengths)*30
+			d_outputs_free, _ = tf.nn.dynamic_rnn( cell=d_lstm_cell,
+												inputs = free_behavior,
+												sequence_length = free_lengths,
+												dtype = tf.float32,
+												scope = scope_disc )
+			#d_outputs_free = tf.transpose( d_outputs_free, [1,0,2] )
+			#d_last_output_free = tf.gather( d_outputs_free, int(d_outputs_free.get_shape()[0])-1 )
+			d_last_output_free = tf.slice( d_outputs_free, [0,-1,0],[-1,-1,-1] )
+			d_logits_free = tf.contrib.layers.fully_connected( inputs = d_last_output_free,
+															num_outputs = 2,
+															activation_fn = None,
+															weights_initializer = model.initializer,
+															scope = scope_disc )
+
+		d_loss_teacher = tf.reduce_mean( tf.nn.sigmoid_cross_entropy_with_logits(
+									 logits=d_logits_teacher, labels=tf.ones_like(d_logits_teacher) ) )
+		d_loss_free = tf.reduce_mean( tf.nn.sigmoid_cross_entropy_with_logits(
+									 logits=d_logits_free, labels=tf.zeros_like(d_logits_free) ) )
+		d_loss = d_loss_teacher + d_loss_free
+
+		g_loss = tf.reduce_mean( tf.nn.sigmoid_cross_entropy_with_logits(
+									 logits=d_logits_free, labels=tf.ones_like(d_logits_free) ) )
+
+		summary = {}
+		summary['NLL_loss'] = tf.summary.scalar('NLL_loss', model.total_loss)
+		summary['d_loss'] = tf.summary.scalar('d_loss', d_loss)
+		summary['d_loss_teacher'] = tf.summary.scalar('d_loss_teacher', d_loss_teacher)
+		summary['d_loss_free'] = tf.summary.scalar('d_loss_free', d_loss_free)
+		summary['g_loss'] = tf.summary.scalar('g_loss', g_loss)
+
+		# Set up the learning rate for training ops
 		learning_rate_decay_fn = None
 		if FLAGS.train_inception:
 			learning_rate = tf.constant(training_config.train_inception_learning_rate)
@@ -96,14 +173,40 @@ def main(unused_argv):
 
 				learning_rate_decay_fn = _learning_rate_decay_fn
 
+		# Collect trainable variables
+		vars_all = [ v for v in tf.trainable_variables() if v not in model.inception_variables ]
+		d_vars = [ v for v in vars_all if 'discr' in v.name ]
+		g_vars = [ v for v in vars_all if 'discr' not in v.name ]
+
 		# Set up the training ops.
-		train_op = tf.contrib.layers.optimize_loss(
-				loss=model.total_loss,
-				global_step=model.global_step,
-				learning_rate=learning_rate,
-				optimizer=training_config.optimizer,
-				clip_gradients=training_config.clip_gradients,
-				learning_rate_decay_fn=learning_rate_decay_fn)
+		train_op_NLL = tf.contrib.layers.optimize_loss(
+											loss = model.total_loss,
+											global_step = model.global_step,
+											learning_rate = learning_rate,
+											optimizer = training_config.optimizer,
+											clip_gradients = training_config.clip_gradients,
+											learning_rate_decay_fn = learning_rate_decay_fn,
+											variables = g_vars )
+
+		train_op_disc = tf.contrib.layers.optimize_loss(
+											loss = d_loss,
+											global_step = model.global_step,
+											learning_rate = learning_rate,
+											optimizer = training_config.optimizer,
+											clip_gradients = training_config.clip_gradients,
+											learning_rate_decay_fn = learning_rate_decay_fn,
+											variables = d_vars )
+
+		train_op_gen = tf.contrib.layers.optimize_loss(
+											loss=model.total_loss+g_loss,
+											global_step=model.global_step,
+											learning_rate=learning_rate,
+											optimizer=training_config.optimizer,
+											clip_gradients=training_config.clip_gradients,
+											learning_rate_decay_fn=learning_rate_decay_fn,
+											variables = g_vars)
+
+
 
 		# Set up the Saver for saving and restoring model checkpoints.
 		saver = tf.train.Saver(max_to_keep=training_config.max_checkpoints_to_keep)
@@ -114,7 +217,6 @@ def main(unused_argv):
 			
 			# Set up the training ops
 			nBatches = num_batches_per_epoch
-			summary_loss = tf.summary.scalar('loss', model.total_loss)
 			
 			summaryWriter = tf.summary.FileWriter(train_dir, sess.graph)
 			tf.global_variables_initializer().run()
@@ -140,6 +242,7 @@ def main(unused_argv):
 				# run inference for not-trained model
 				#self.valid( valid_image, f_valid_text )
 				captions = generator.beam_search( sess, image_valid )
+				f_valid_text.write( 'initial caption\n' )
 				for i, caption in enumerate(captions):
 					sentence = [vocab.id_to_word(w) for w in caption.sentence[1:-1]]
 					sentence = " ".join(sentence)
@@ -153,7 +256,7 @@ def main(unused_argv):
 				for epoch in range(FLAGS.number_of_steps):
 					for batch_idx in range(nBatches):
 						counter += 1
-						_, g_loss, summary_str = sess.run([train_op, model.total_loss, summary_loss] )
+						_, g_loss, summary_str = sess.run([train_op_NLL, model.total_loss, summary['NLL_loss']] )
 						summaryWriter.add_summary(summary_str, counter)
 			
 						if counter % FLAGS.log_every_n_steps==0:
@@ -162,18 +265,20 @@ def main(unused_argv):
 			
 						if counter % 500 == 1 or \
 							(epoch==FLAGS.number_of_steps-1 and batch_idx==nBatches-1) :
-							saver.save( sess, train_dir, global_step=counter)
+							saver.save( sess, filename_saved_model, global_step=counter)
 			
-					# run test after every epoch
-					#self.valid( valid_image, f_valid_text )
-					captions = generator.beam_search( sess, image_valid )
-					for i, caption in enumerate(captions):
-						sentence = [vocab.id_to_word(w) for w in caption.sentence[1:-1]]
-						sentence = " ".join(sentence)
-						sentence = "  %d) %s (p=%f)" % (i, sentence, math.exp(caption.logprob))
-						print( sentence )
-						f_valid_text.write( sentence +'\n' )
-					f_valid_text.flush()
+						if (batch_idx+1) % (nBatches//10) == 0  or batch_idx == nBatches-1:
+							# run test after every epoch
+							#self.valid( valid_image, f_valid_text )
+							captions = generator.beam_search( sess, image_valid )
+							f_valid_text.write( 'epoch {} batch {}/{}\n'.format( epoch, batch_idx ) )
+							for i, caption in enumerate(captions):
+								sentence = [vocab.id_to_word(w) for w in caption.sentence[1:-1]]
+								sentence = " ".join(sentence)
+								sentence = "  %d) %s (p=%f)" % (i, sentence, math.exp(caption.logprob))
+								print( sentence )
+								f_valid_text.write( sentence +'\n' )
+							f_valid_text.flush()
 
 			
 			except tf.errors.OutOfRangeError:

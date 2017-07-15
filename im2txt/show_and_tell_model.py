@@ -23,6 +23,8 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import pdb
+import numpy as np
 import tensorflow as tf
 
 from ops import image_embedding
@@ -37,7 +39,7 @@ class ShowAndTellModel(object):
 	Oriol Vinyals, Alexander Toshev, Samy Bengio, Dumitru Erhan
 	"""
 
-	def __init__(self, config, mode, train_inception=False, reuse=False):
+	def __init__(self, config, mode, vocab=None, train_inception=False, reuse=False):
 		"""Basic setup.
 
 		Args:
@@ -45,10 +47,12 @@ class ShowAndTellModel(object):
 			mode: "train", "eval" or "inference".
 			train_inception: Whether the inception submodel variables are trainable.
 		"""
-		assert mode in ["train", "eval", "inference"]
+		assert mode in ["train", "eval", "inference", "free"]
+		assert mode!='free' or vocab is not None
 		self.config = config
 		self.mode = mode
 		self.train_inception = train_inception
+		self.vocab = vocab
 
 		self.reuse = reuse
 
@@ -113,11 +117,11 @@ class ShowAndTellModel(object):
 			A float32 Tensor of shape [height, width, 3]; the processed image.
 		"""
 		return image_processing.process_image(encoded_image,
-																					is_training=self.is_training(),
-																					height=self.config.image_height,
-																					width=self.config.image_width,
-																					thread_id=thread_id,
-																					image_format=self.config.image_format)
+												is_training=self.is_training(),
+												height=self.config.image_height,
+												width=self.config.image_width,
+												thread_id=thread_id,
+												image_format=self.config.image_format)
 
 	def build_inputs(self):
 		"""Input prefetching, preprocessing and batching.
@@ -128,6 +132,7 @@ class ShowAndTellModel(object):
 			self.target_seqs (training and eval only)
 			self.input_mask (training and eval only)
 		"""
+		# inputs for inference
 		if self.mode == "inference":
 			# In inference mode, images and inputs are fed via placeholders.
 			image_feed = tf.placeholder(dtype=tf.string, shape=[], name="image_feed")
@@ -144,6 +149,7 @@ class ShowAndTellModel(object):
 			input_mask = None
 		else:
 			# Prefetch serialized SequenceExample protos.
+			# inputs for teacher and free-run are same
 			input_queue = input_ops.prefetch_input_data(
 					self.reader,
 					self.config.input_file_pattern,
@@ -171,8 +177,8 @@ class ShowAndTellModel(object):
 												self.config.batch_size)
 			images, input_seqs, target_seqs, input_mask = (
 					input_ops.batch_with_dynamic_pad(images_and_captions,
-																					 batch_size=self.config.batch_size,
-																					 queue_capacity=queue_capacity))
+															 batch_size=self.config.batch_size,
+															 queue_capacity=queue_capacity))
 
 		self.images = images
 		self.input_seqs = input_seqs
@@ -248,8 +254,7 @@ class ShowAndTellModel(object):
 		# This LSTM cell has biases and outputs tanh(new_c) * sigmoid(o), but the
 		# modified LSTM in the "Show and Tell" paper has no biases and outputs
 		# new_c * sigmoid(o).
-		lstm_cell = tf.contrib.rnn.BasicLSTMCell(
-				num_units=self.config.num_lstm_units, state_is_tuple=True)
+		lstm_cell = tf.contrib.rnn.BasicLSTMCell(self.config.num_lstm_units)
 		if self.mode == "train":
 			lstm_cell = tf.contrib.rnn.DropoutWrapper(
 					lstm_cell,
@@ -257,6 +262,7 @@ class ShowAndTellModel(object):
 					output_keep_prob=self.config.lstm_dropout_keep_prob)
 
 		with tf.variable_scope("lstm", initializer=self.initializer) as lstm_scope:
+			if self.reuse: lstm_scope.reuse_variables()
 			# Feed the image embeddings to set the initial LSTM state.
 			zero_state = lstm_cell.zero_state(
 					batch_size=self.image_embeddings.get_shape()[0], dtype=tf.float32)
@@ -283,22 +289,35 @@ class ShowAndTellModel(object):
 
 				# Concatentate the resulting state.
 				self.inference_state_output = tf.concat(axis=1, values=state_tuple, name="state")
+			elif self.mode == "free":
+				# free
+				nSteps = 30
+				cell_outputs = []
+				cell_states = []
+				cell_output = tf.squeeze(self.seq_embeddings, axis=[1])
+				cell_state = initial_state
+				for time_step in range(nSteps):
+					cell_output, cell_state = lstm_cell( cell_output, cell_state ) 
+					cell_outputs.append(cell_output)
+				lstm_outputs = tf.stack( cell_outputs, axis=1 )
+				lstm_final_state = cell_state
 			else:
 				# Run the batch of sequence embeddings through the LSTM.
+				# teacher
 				sequence_length = tf.reduce_sum(self.input_mask, 1)
-				lstm_outputs, _ = tf.nn.dynamic_rnn(cell=lstm_cell,
+				lstm_outputs, lstm_final_state= tf.nn.dynamic_rnn(cell=lstm_cell,
 													inputs=self.seq_embeddings,
 													sequence_length=sequence_length,
 													initial_state=initial_state,
 													dtype=tf.float32,
 													scope=lstm_scope)
-
 		# Stack batches vertically.
-		lstm_outputs = tf.reshape(lstm_outputs, [-1, lstm_cell.output_size])
+		lstm_outputs_reshaped = tf.reshape(lstm_outputs, [-1, lstm_cell.output_size])
 
 		with tf.variable_scope("logits") as logits_scope:
+			if self.reuse: logits_scope.reuse_variables()
 			logits = tf.contrib.layers.fully_connected(
-					inputs=lstm_outputs,
+					inputs=lstm_outputs_reshaped,
 					num_outputs=self.config.vocab_size,
 					activation_fn=None,
 					weights_initializer=self.initializer,
@@ -306,6 +325,8 @@ class ShowAndTellModel(object):
 
 		if self.mode == "inference":
 			self.inference_softmax = tf.nn.softmax(logits, name="softmax")
+		elif self.mode == "free":
+			self.behavior = [lstm_outputs, lstm_final_state]
 		else:
 			targets = tf.reshape(self.target_seqs, [-1])
 			weights = tf.to_float(tf.reshape(self.input_mask, [-1]))
@@ -327,6 +348,7 @@ class ShowAndTellModel(object):
 			self.total_loss = total_loss
 			self.target_cross_entropy_losses = losses	# Used in evaluation.
 			self.target_cross_entropy_loss_weights = weights	# Used in evaluation.
+			self.behavior = [lstm_outputs, lstm_final_state]
 
 	def setup_inception_initializer(self):
 		"""Sets up the function to restore inception variables from checkpoint."""
@@ -343,14 +365,15 @@ class ShowAndTellModel(object):
 
 	def setup_global_step(self):
 		"""Sets up the global step Tensor."""
-		if self.reuse: tf.get_variable_scope().reuse_variables()
-		global_step = tf.get_variable(
-				name="global_step",
-				shape=[],
-				dtype=tf.int32,
-				initializer=tf.zeros_initializer(),
-				trainable=False,
-				collections=[tf.GraphKeys.GLOBAL_STEP, tf.GraphKeys.GLOBAL_VARIABLES])
+		with tf.variable_scope('global_step') as scope_step:
+			if self.reuse: scope_step.reuse_variables()
+			global_step = tf.get_variable(
+					name="global_step",
+					shape=[],
+					dtype=tf.int32,
+					initializer=tf.zeros_initializer(),
+					trainable=False,
+					collections=[tf.GraphKeys.GLOBAL_STEP, tf.GraphKeys.GLOBAL_VARIABLES])
 #		global_step = tf.Variable(
 #				initial_value=0,
 #				name="global_step",
@@ -363,9 +386,8 @@ class ShowAndTellModel(object):
 		"""Creates all ops for training and evaluation."""
 		self.build_inputs()
 		self.build_image_embeddings()
-		self.build_seq_embeddings()
-		with tf.variable_scope('generator') as scope_gen:
-			if self.reuse: scope_gen.reuse_variables()
+		with tf.variable_scope('generator') as scope_generator:
+			self.build_seq_embeddings()
 			self.build_model()
 		self.setup_inception_initializer()
 		self.setup_global_step()
