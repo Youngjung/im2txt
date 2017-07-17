@@ -294,7 +294,7 @@ class ShowAndTellModel(object):
 				nSteps = 30
 				cell_outputs = []
 				cell_states = []
-				cell_output = tf.squeeze(self.seq_embeddings, axis=[1])
+				cell_output = self.seq_embeddings[:,0,:] # start_word
 				cell_state = initial_state
 				for time_step in range(nSteps):
 					cell_output, cell_state = lstm_cell( cell_output, cell_state ) 
@@ -382,10 +382,18 @@ class ShowAndTellModel(object):
 
 		self.global_step = global_step
 
-	def build(self):
+	def build(self, existing_inputs=None):
 		"""Creates all ops for training and evaluation."""
-		self.build_inputs()
+		if existing_inputs is None:
+			self.build_inputs()
+		else:
+			self.images,\
+			self.input_seqs,\
+			self.target_seqs,\
+			self.input_mask = existing_inputs
+
 		self.build_image_embeddings()
+
 		with tf.variable_scope('generator') as scope_generator:
 			self.build_seq_embeddings()
 			self.build_model()
