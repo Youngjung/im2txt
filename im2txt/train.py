@@ -21,6 +21,7 @@ from __future__ import print_function
 import math
 import os
 import time
+import datetime
 import numpy as np
 import tensorflow as tf
 
@@ -127,6 +128,7 @@ def main(unused_argv):
 															activation_fn = None,
 															weights_initializer = model.initializer,
 															scope = scope_disc )
+			d_accuracy_teacher = tf.reduce_mean( tf.cast( tf.argmax( d_logits_teacher, axis=1 ), tf.float32 ) )
 
 			scope_disc.reuse_variables()
 			d_outputs_free, _ = tf.nn.dynamic_rnn( cell=d_lstm_cell,
@@ -140,6 +142,9 @@ def main(unused_argv):
 															activation_fn = None,
 															weights_initializer = model.initializer,
 															scope = scope_disc )
+			d_accuracy_free = tf.reduce_mean( tf.cast( 1-tf.argmax( d_logits_free, axis=1 ), tf.float32 ) )
+
+			d_accuracy = ( d_accuracy_teacher + d_accuracy_free ) /2
 
 		d_loss_teacher = tf.reduce_mean( tf.nn.sigmoid_cross_entropy_with_logits(name='d_loss_teacher',
 									 logits=d_logits_teacher, labels=tf.ones_like(d_logits_teacher) ) )
@@ -159,6 +164,7 @@ def main(unused_argv):
 		summary['g_loss'] = tf.summary.scalar('g_loss', g_loss)
 		summary['g_and_NLL_loss'] = tf.summary.scalar('g_and_NLL_loss', g_and_NLL_loss)
 		summary['d_logits_free'] = tf.summary.histogram('d_logits_free', d_logits_free)
+		summary['d_accuracy'] = tf.summary.histogram('d_accuracy', d_accuracy)
 
 		# Set up the learning rate for training ops
 		learning_rate_decay_fn = None
@@ -166,7 +172,6 @@ def main(unused_argv):
 			learning_rate = tf.constant(training_config.train_inception_learning_rate)
 		else:
 			learning_rate = tf.constant(training_config.initial_learning_rate)
-			learning_rate1 = tf.constant(training_config.initial_learning_rate)
 			if training_config.learning_rate_decay_factor > 0:
 				num_batches_per_epoch = (training_config.num_examples_per_epoch //
 																 model_config.batch_size)
@@ -182,7 +187,6 @@ def main(unused_argv):
 							staircase=True)
 
 				learning_rate_decay_fn = _learning_rate_decay_fn
-				learning_rate_decay_fn1 = _learning_rate_decay_fn
 
 		# Collect trainable variables
 		vars_all = [ v for v in tf.trainable_variables() if v not in model.inception_variables ]
@@ -203,10 +207,10 @@ def main(unused_argv):
 		train_op_disc = tf.contrib.layers.optimize_loss(
 											loss = d_loss,
 											global_step = model.global_step,
-											learning_rate = learning_rate1,
+											learning_rate = learning_rate,
 											optimizer = training_config.optimizer,
 											clip_gradients = training_config.clip_gradients,
-											learning_rate_decay_fn = learning_rate_decay_fn1,
+											learning_rate_decay_fn = learning_rate_decay_fn,
 											variables = d_vars,
 											name='optimize_disc_loss' )
 
@@ -250,12 +254,12 @@ def main(unused_argv):
 				# for validation
 				with tf.gfile.GFile('data/mscoco/raw-data/val2014/COCO_val2014_000000224477.jpg','r') as f:
 					image_valid = f.read()
-				f_valid_text = open('valid.txt','a')
+				f_valid_text = open(os.path.join(train_dir,'valid.txt'),'a')
 			
 				# run inference for not-trained model
 				#self.valid( valid_image, f_valid_text )
 				captions = generator.beam_search( sess, image_valid )
-				f_valid_text.write( 'initial caption\n' )
+				f_valid_text.write( 'initial caption {}\n'.format( str(datetime.datetime.now().time())[:-7] ) )
 				for i, caption in enumerate(captions):
 					sentence = [vocab.id_to_word(w) for w in caption.sentence[1:-1]]
 					sentence = " ".join(sentence)
@@ -266,39 +270,56 @@ def main(unused_argv):
 
 
 				# run training loop
-				lossnames_to_print = ['NLL_loss','g_loss', 'd_loss']
-				NLL_loss_val = float('Inf')
-				g_loss_val = float('Inf')
-				d_loss_val = float('Inf')
+				lossnames_to_print = ['NLL_loss','g_loss', 'd_loss', 'd_acc', 'g_acc']
+				val_NLL_loss = float('Inf')
+				val_g_loss = float('Inf')
+				val_d_loss = float('Inf')
+				val_d_acc = 0
+				val_g_acc = 0
 				for epoch in range(FLAGS.number_of_steps):
 					for batch_idx in range(nBatches):
 						counter += 1
-						if NLL_loss_val > 3.5:
-							_, NLL_loss_val, summary_str = sess.run([train_op_NLL, model.total_loss, summary['NLL_loss']] )
+						is_disc_trained = False
+						is_gen_trained = False
+						if val_NLL_loss> 3.5:
+							_, val_NLL_loss, summary_str = sess.run([train_op_NLL, model.total_loss, summary['NLL_loss']] )
 							summaryWriter.add_summary(summary_str, counter)
 						else:
-							#val_outputs_teacher, val_outputs_free, val_teacher_length, val_gather_idx,\
-							#	val_last_output_teacher, val_last_output_free = sess.run(
-							#	[d_outputs_teacher, d_outputs_free,teacher_lengths,gather_idx,\
-							#	d_last_output_teacher, d_last_output_free])
-							#pdb.set_trace()
-							_, d_loss_val, smr1, smr2, smr3, smr4 = sess.run([train_op_disc, d_loss,
-								 summary['d_loss_teacher'], summary['d_loss_free'], summary['d_loss'],summary['d_logits_free']] )
+							# train discriminator
+#							if val_d_acc < 0.9:
+#							is_disc_trained = True
+							_, val_d_loss, val_d_acc, \
+							smr1, smr2, smr3, smr4 = sess.run([train_op_disc, d_loss, d_accuracy, 
+								 summary['d_loss_teacher'], summary['d_loss_free'], summary['d_loss'],summary['d_accuracy']] )
 							summaryWriter.add_summary(smr1, counter)
 							summaryWriter.add_summary(smr2, counter)
 							summaryWriter.add_summary(smr3, counter)
 							summaryWriter.add_summary(smr4, counter)
-							_, g_loss_val, smr1, smr2, smr3 = sess.run( [train_op_gen,g_loss
-								,summary['g_loss'],summary['NLL_loss'], summary['g_and_NLL_loss']] )
+						# train generator
+#						if val_d_acc > 0.45:
+#							is_gen_trained = True	
+							# val_g_acc is temporarily named variable instead of val_d_acc
+							_, val_g_loss, val_NLL_loss, val_g_acc, smr1, smr2, smr3 = sess.run( 
+								[train_op_gen,g_loss,model.total_loss, d_accuracy, 
+								summary['g_loss'],summary['NLL_loss'], summary['g_and_NLL_loss']] )
 							summaryWriter.add_summary(smr1, counter)
 							summaryWriter.add_summary(smr2, counter)
-							
+							summaryWriter.add_summary(smr3, counter)
+							_, val_g_loss, val_NLL_loss, val_g_acc, smr1, smr2, smr3 = sess.run( 
+								[train_op_gen,g_loss,model.total_loss, d_accuracy, 
+								summary['g_loss'],summary['NLL_loss'], summary['g_and_NLL_loss']] )
+							summaryWriter.add_summary(smr1, counter)
+							summaryWriter.add_summary(smr2, counter)
+							summaryWriter.add_summary(smr3, counter)
 			
 						if counter % FLAGS.log_every_n_steps==0:
 							elapsed = time.time() - start_time
 							log( epoch, batch_idx, nBatches, lossnames_to_print,
-								 [NLL_loss_val,g_loss_val,d_loss_val], elapsed, counter )
+								 [val_NLL_loss,val_g_loss,val_d_loss,val_d_acc,val_g_acc], elapsed, counter )
 			
+#						if is_gen_trained:
+#							val_d_acc = val_g_acc
+
 						if counter % 500 == 1 or \
 							(epoch==FLAGS.number_of_steps-1 and batch_idx==nBatches-1) :
 							saver.save( sess, filename_saved_model, global_step=counter)
@@ -307,7 +328,8 @@ def main(unused_argv):
 							# run test after every epoch
 							#self.valid( valid_image, f_valid_text )
 							captions = generator.beam_search( sess, image_valid )
-							f_valid_text.write( 'epoch {} batch {}/{}\n'.format( epoch, batch_idx, nBatches ) )
+							f_valid_text.write( 'count {} epoch {} batch {}/{} ({})\n'.format( \
+								counter, epoch, batch_idx, nBatches, str(datetime.datetime.now().time())[:-7] ) )
 							for i, caption in enumerate(captions):
 								sentence = [vocab.id_to_word(w) for w in caption.sentence[1:-1]]
 								sentence = " ".join(sentence)
