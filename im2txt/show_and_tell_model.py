@@ -327,6 +327,7 @@ class ShowAndTellModel(object):
 			self.inference_softmax = tf.nn.softmax(logits, name="softmax")
 		elif self.mode == "free":
 			self.behavior = [lstm_outputs, lstm_final_state]
+			self.inference_softmax = tf.nn.softmax(logits, name="softmax")
 		else:
 			targets = tf.reshape(self.target_seqs, [-1])
 			weights = tf.to_float(tf.reshape(self.input_mask, [-1]))

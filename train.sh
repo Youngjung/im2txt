@@ -3,7 +3,7 @@ IM2TXT="${HOME}/youngjung/im2txt"
 INCEPTION_CHECKPOINT="${IM2TXT}/model/inception_v3.ckpt"
 
 # Directory to save the model.
-MODEL_DIR="${IM2TXT}/model/train/"
+MODEL_DIR="${IM2TXT}/model/train_sanity_check"
 
 # Build the model.
 #bazel build -c opt im2txt/...

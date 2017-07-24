@@ -23,6 +23,7 @@ import os
 import time
 import datetime
 import numpy as np
+from scipy.misc import imsave
 import tensorflow as tf
 
 import configuration
@@ -53,11 +54,6 @@ def main(unused_argv):
 	assert FLAGS.input_file_pattern, "--input_file_pattern is required"
 	assert FLAGS.train_dir, "--train_dir is required"
 
-	model_config = configuration.ModelConfig()
-	model_config.input_file_pattern = FLAGS.input_file_pattern
-	model_config.inception_checkpoint_file = FLAGS.inception_checkpoint_file
-	training_config = configuration.TrainingConfig()
-
 	# Create training directory.
 	train_dir = FLAGS.train_dir
 	filename_saved_model = os.path.join(FLAGS.train_dir,'im2txt')
@@ -65,7 +61,15 @@ def main(unused_argv):
 		tf.logging.info("Creating training directory: %s", train_dir)
 		tf.gfile.MakeDirs(train_dir)
 
+	save_flags( os.path.join(FLAGS.train_dir,'flags.txt') )
+
+	model_config = configuration.ModelConfig()
+	model_config.input_file_pattern = FLAGS.input_file_pattern
+	model_config.inception_checkpoint_file = FLAGS.inception_checkpoint_file
+	training_config = configuration.TrainingConfig()
+
 	vocab = vocabulary.Vocabulary( FLAGS.vocab_file )
+	vocab_size = 12000
 
 	# Build the TensorFlow graph.
 	g = tf.Graph()
@@ -95,6 +99,11 @@ def main(unused_argv):
 		free_state_c = tf.expand_dims( free_state_c, axis=1 )
 		free_state_h = tf.expand_dims( free_state_h, axis=1 )
 		
+		# get free sentence
+		free_softmax = model_free.inference_softmax
+		free_softmax_reshaped = tf.reshape( free_softmax, [-1,30,vocab_size] )
+		free_sentence = tf.argmax( free_softmax_reshaped, axis=2 )
+
 		# prepare behavior to be LSTM's input
 		teacher_behavior = tf.concat( [teacher_outputs,teacher_state_c,teacher_state_h], axis=1 )
 		free_behavior = tf.concat( [free_outputs,free_state_c,free_state_h], axis=1 )
@@ -146,6 +155,8 @@ def main(unused_argv):
 
 			d_accuracy = ( d_accuracy_teacher + d_accuracy_free ) /2
 
+		NLL_loss = model.total_loss
+
 		d_loss_teacher = tf.reduce_mean( tf.nn.sigmoid_cross_entropy_with_logits(name='d_loss_teacher',
 									 logits=d_logits_teacher, labels=tf.ones_like(d_logits_teacher) ) )
 		d_loss_free = tf.reduce_mean( tf.nn.sigmoid_cross_entropy_with_logits(name='d_loss_free',
@@ -154,10 +165,10 @@ def main(unused_argv):
 
 		g_loss = tf.reduce_mean( tf.nn.sigmoid_cross_entropy_with_logits(name='g_loss',
 									 logits=d_logits_free, labels=tf.ones_like(d_logits_free) ) )
-		g_and_NLL_loss = g_loss + model.total_loss
+		g_and_NLL_loss = g_loss + NLL_loss
 
 		summary = {}
-		summary['NLL_loss'] = tf.summary.scalar('NLL_loss', model.total_loss)
+		summary['NLL_loss'] = tf.summary.scalar('NLL_loss', NLL_loss)
 		summary['d_loss'] = tf.summary.scalar('d_loss', d_loss)
 		summary['d_loss_teacher'] = tf.summary.scalar('d_loss_teacher', d_loss_teacher)
 		summary['d_loss_free'] = tf.summary.scalar('d_loss_free', d_loss_free)
@@ -195,7 +206,7 @@ def main(unused_argv):
 
 		# Set up the training ops.
 		train_op_NLL = tf.contrib.layers.optimize_loss(
-											loss = model.total_loss,
+											loss = NLL_loss,
 											global_step = model.global_step,
 											learning_rate = learning_rate,
 											optimizer = training_config.optimizer,
@@ -215,7 +226,7 @@ def main(unused_argv):
 											name='optimize_disc_loss' )
 
 		train_op_gen = tf.contrib.layers.optimize_loss(
-											loss=model.total_loss+g_loss,
+											loss=NLL_loss+g_loss,
 											global_step=model.global_step,
 											learning_rate=learning_rate,
 											optimizer=training_config.optimizer,
@@ -252,20 +263,24 @@ def main(unused_argv):
 
 			try:
 				# for validation
-				with tf.gfile.GFile('data/mscoco/raw-data/val2014/COCO_val2014_000000224477.jpg','r') as f:
-					image_valid = f.read()
 				f_valid_text = open(os.path.join(train_dir,'valid.txt'),'a')
+				filenames = os.listdir('testimgs')
+				valid_images = []
+				for filename in filenames:
+				    with tf.gfile.GFile(os.path.join('testimgs', filename),'r') as f:
+				        valid_images.append( f.read() )
 			
 				# run inference for not-trained model
 				#self.valid( valid_image, f_valid_text )
-				captions = generator.beam_search( sess, image_valid )
-				f_valid_text.write( 'initial caption {}\n'.format( str(datetime.datetime.now().time())[:-7] ) )
-				for i, caption in enumerate(captions):
-					sentence = [vocab.id_to_word(w) for w in caption.sentence[1:-1]]
-					sentence = " ".join(sentence)
-					sentence = "  %d) %s (p=%f)" % (i, sentence, math.exp(caption.logprob))
-					print( sentence )
-					f_valid_text.write( sentence +'\n' )
+				for i, valid_image in enumerate(valid_images):
+					captions = generator.beam_search( sess, valid_image )
+					f_valid_text.write( 'initial caption (beam) {}\n'.format( str(datetime.datetime.now().time())[:-7] ) )
+					for j, caption in enumerate(captions):
+						sentence = [vocab.id_to_word(w) for w in caption.sentence[1:-1]]
+						sentence = " ".join(sentence)
+						sentence = "  {}-{}) {} (p={:.8f})".format(i,j, sentence, math.exp(caption.logprob))
+						print( sentence )
+						f_valid_text.write( sentence +'\n' )
 				f_valid_text.flush()
 
 
@@ -281,59 +296,72 @@ def main(unused_argv):
 						counter += 1
 						is_disc_trained = False
 						is_gen_trained = False
-						if val_NLL_loss> 3.5:
-							_, val_NLL_loss, summary_str = sess.run([train_op_NLL, model.total_loss, summary['NLL_loss']] )
-							summaryWriter.add_summary(summary_str, counter)
-						else:
-							# train discriminator
-#							if val_d_acc < 0.9:
-#							is_disc_trained = True
-							_, val_d_loss, val_d_acc, \
-							smr1, smr2, smr3, smr4 = sess.run([train_op_disc, d_loss, d_accuracy, 
-								 summary['d_loss_teacher'], summary['d_loss_free'], summary['d_loss'],summary['d_accuracy']] )
-							summaryWriter.add_summary(smr1, counter)
-							summaryWriter.add_summary(smr2, counter)
-							summaryWriter.add_summary(smr3, counter)
-							summaryWriter.add_summary(smr4, counter)
-						# train generator
-#						if val_d_acc > 0.45:
-#							is_gen_trained = True	
-							# val_g_acc is temporarily named variable instead of val_d_acc
-							_, val_g_loss, val_NLL_loss, val_g_acc, smr1, smr2, smr3 = sess.run( 
-								[train_op_gen,g_loss,model.total_loss, d_accuracy, 
-								summary['g_loss'],summary['NLL_loss'], summary['g_and_NLL_loss']] )
-							summaryWriter.add_summary(smr1, counter)
-							summaryWriter.add_summary(smr2, counter)
-							summaryWriter.add_summary(smr3, counter)
-							_, val_g_loss, val_NLL_loss, val_g_acc, smr1, smr2, smr3 = sess.run( 
-								[train_op_gen,g_loss,model.total_loss, d_accuracy, 
-								summary['g_loss'],summary['NLL_loss'], summary['g_and_NLL_loss']] )
-							summaryWriter.add_summary(smr1, counter)
-							summaryWriter.add_summary(smr2, counter)
-							summaryWriter.add_summary(smr3, counter)
+
+						# train NLL loss only (for im2txt sanity check)
+						_, val_NLL_loss, smry_str, val_free_sentence, val_images, val_captions = sess.run(
+							[train_op_NLL, NLL_loss, summary['NLL_loss'], free_sentence,model.images,model.input_seqs] )
+						summaryWriter.add_summary(smry_str, counter)
+						for i in range(32):
+							filename='val_images_{}.jpg'.format(i)
+							caption = [ vocab.id_to_word(v) for v in val_captions[i] ]
+							caption = ' '.join(caption)
+							print( '{}) {}'.format(i,caption) )
+							imsave( filename, val_images[i] )
+						pdb.set_trace()
+
+#						if val_NLL_loss> 3.5:
+#							_, val_NLL_loss, smry_str = sess.run([train_op_NLL, NLL_loss, summary['NLL_loss']] )
+#							summaryWriter.add_summary(smry_str, counter)
+#						else:
+#							# train discriminator
+#							_, val_d_loss, val_d_acc, \
+#							smr1, smr2, smr3, smr4 = sess.run([train_op_disc, d_loss, d_accuracy, 
+#								 summary['d_loss_teacher'], summary['d_loss_free'], summary['d_loss'],summary['d_accuracy']] )
+#							summaryWriter.add_summary(smr1, counter)
+#							summaryWriter.add_summary(smr2, counter)
+#							summaryWriter.add_summary(smr3, counter)
+#							summaryWriter.add_summary(smr4, counter)
+#
+#							# train generator
+#							_, val_g_loss, val_NLL_loss, val_g_acc, smr1, smr2, smr3 = sess.run( 
+#								[train_op_gen,g_loss,NLL_loss, d_accuracy, 
+#								summary['g_loss'],summary['NLL_loss'], summary['g_and_NLL_loss']] )
+#							summaryWriter.add_summary(smr1, counter)
+#							summaryWriter.add_summary(smr2, counter)
+#							summaryWriter.add_summary(smr3, counter)
+#							_, val_g_loss, val_NLL_loss, val_g_acc, smr1, smr2, smr3 = sess.run( 
+#								[train_op_gen,g_loss,NLL_loss, d_accuracy, 
+#								summary['g_loss'],summary['NLL_loss'], summary['g_and_NLL_loss']] )
+#							summaryWriter.add_summary(smr1, counter)
+#							summaryWriter.add_summary(smr2, counter)
+#							summaryWriter.add_summary(smr3, counter)
 			
 						if counter % FLAGS.log_every_n_steps==0:
 							elapsed = time.time() - start_time
 							log( epoch, batch_idx, nBatches, lossnames_to_print,
 								 [val_NLL_loss,val_g_loss,val_d_loss,val_d_acc,val_g_acc], elapsed, counter )
 			
-#						if is_gen_trained:
-#							val_d_acc = val_g_acc
-
 						if counter % 500 == 1 or \
 							(epoch==FLAGS.number_of_steps-1 and batch_idx==nBatches-1) :
 							saver.save( sess, filename_saved_model, global_step=counter)
 			
 						if (batch_idx+1) % (nBatches//10) == 0  or batch_idx == nBatches-1:
 							# run test after every epoch
-							#self.valid( valid_image, f_valid_text )
-							captions = generator.beam_search( sess, image_valid )
 							f_valid_text.write( 'count {} epoch {} batch {}/{} ({})\n'.format( \
-								counter, epoch, batch_idx, nBatches, str(datetime.datetime.now().time())[:-7] ) )
-							for i, caption in enumerate(captions):
-								sentence = [vocab.id_to_word(w) for w in caption.sentence[1:-1]]
+									counter, epoch, batch_idx, nBatches, str(datetime.datetime.now().time())[:-7] ) )
+							for i, valid_image in enumerate(valid_images):
+								captions = generator.beam_search( sess, valid_image )
+								for j, caption in enumerate(captions):
+									sentence = [vocab.id_to_word(w) for w in caption.sentence[1:-1]]
+									sentence = " ".join(sentence)
+									sentence = "  {}-{}) {} (p={:.8f})".format(i,j, sentence, math.exp(caption.logprob))
+									print( sentence )
+									f_valid_text.write( sentence +'\n' )
+								# free sentence check
+							for i, caption in enumerate(val_free_sentence):
+								sentence = [vocab.id_to_word(w) for w in caption[1:-1]]
 								sentence = " ".join(sentence)
-								sentence = "  %d) %s (p=%f)" % (i, sentence, math.exp(caption.logprob))
+								sentence = "  free %d) %s" % (i, sentence)
 								print( sentence )
 								f_valid_text.write( sentence +'\n' )
 							f_valid_text.flush()
@@ -388,6 +416,11 @@ def log( epoch, batch, nBatches, lossnames, losses, elapsed, counter=None, filel
 		filelogger.write( log )
 	return log
 
+def save_flags( path ):
+    flags_dict = tf.flags.FLAGS.__flags
+    with open(path, 'w') as f:
+        for key,val in flags_dict.iteritems():
+            f.write( '{} = {}\n'.format(key,val) )
 
 if __name__ == "__main__":
 	tf.app.run()

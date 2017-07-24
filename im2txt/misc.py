@@ -372,3 +372,9 @@ def process_image(encoded_image, opts, thread_id=0):
 											width=opts.input_width,
 											thread_id=thread_id,
 											image_format=opts.image_format)
+
+def save_flags( path ):
+	flags_dict = tf.flags.FLAGS.__flags
+	with open(path, 'w') as f:
+		for key,val in flags_dict:
+			f.write( '{},{}\n'.format(key,val) )
