@@ -109,6 +109,8 @@ def main(unused_argv):
 		saver = tf.train.Saver(max_to_keep=training_config.max_checkpoints_to_keep)
 
 		with tf.Session() as sess:
+			tf.global_variables_initializer().run()
+
 			# load inception variables
 			model.init_fn( sess )
 			
@@ -116,7 +118,6 @@ def main(unused_argv):
 			nBatches = num_batches_per_epoch
 			
 			summaryWriter = tf.summary.FileWriter(train_dir, sess.graph)
-			tf.global_variables_initializer().run()
 			
 			# start input enqueue threads
 			coord = tf.train.Coordinator()
