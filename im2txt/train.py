@@ -241,6 +241,10 @@ def main(unused_argv):
 		saver = tf.train.Saver(max_to_keep=training_config.max_checkpoints_to_keep)
 
 		with tf.Session() as sess:
+
+			# initialize all variables
+			tf.global_variables_initializer().run()
+
 			# load inception variables
 			model.init_fn( sess )
 			
@@ -248,7 +252,6 @@ def main(unused_argv):
 			nBatches = num_batches_per_epoch
 			
 			summaryWriter = tf.summary.FileWriter(train_dir, sess.graph)
-			tf.global_variables_initializer().run()
 			
 			# start input enqueue threads
 			coord = tf.train.Coordinator()
@@ -265,10 +268,13 @@ def main(unused_argv):
 				# for validation
 				f_valid_text = open(os.path.join(train_dir,'valid.txt'),'a')
 				filenames = os.listdir('testimgs')
+				filenames.sort()
 				valid_images = []
+				print( 'validation image filenames' )
 				for filename in filenames:
 				    with tf.gfile.GFile(os.path.join('testimgs', filename),'r') as f:
 				        valid_images.append( f.read() )
+					print( filename )
 			
 				# run inference for not-trained model
 				#self.valid( valid_image, f_valid_text )
@@ -278,14 +284,15 @@ def main(unused_argv):
 					for j, caption in enumerate(captions):
 						sentence = [vocab.id_to_word(w) for w in caption.sentence[1:-1]]
 						sentence = " ".join(sentence)
-						sentence = "  {}-{}) {} (p={:.8f})".format(i,j, sentence, math.exp(caption.logprob))
+						sentence = "  {}-{}) {} (p={:.8f})".format(i+1,j+1, sentence, math.exp(caption.logprob))
 						print( sentence )
 						f_valid_text.write( sentence +'\n' )
 				f_valid_text.flush()
 
 
 				# run training loop
-				lossnames_to_print = ['NLL_loss','g_loss', 'd_loss', 'd_acc', 'g_acc']
+				# lossnames_to_print = ['NLL_loss','g_loss', 'd_loss', 'd_acc', 'g_acc']
+				lossnames_to_print = ['NLL_loss']
 				val_NLL_loss = float('Inf')
 				val_g_loss = float('Inf')
 				val_d_loss = float('Inf')
@@ -298,16 +305,9 @@ def main(unused_argv):
 						is_gen_trained = False
 
 						# train NLL loss only (for im2txt sanity check)
-						_, val_NLL_loss, smry_str, val_free_sentence, val_images, val_captions = sess.run(
-							[train_op_NLL, NLL_loss, summary['NLL_loss'], free_sentence,model.images,model.input_seqs] )
+						_, val_NLL_loss, smry_str, val_free_sentence = sess.run(
+							[train_op_NLL, NLL_loss, summary['NLL_loss'], free_sentence ] )
 						summaryWriter.add_summary(smry_str, counter)
-						for i in range(32):
-							filename='val_images_{}.jpg'.format(i)
-							caption = [ vocab.id_to_word(v) for v in val_captions[i] ]
-							caption = ' '.join(caption)
-							print( '{}) {}'.format(i,caption) )
-							imsave( filename, val_images[i] )
-						pdb.set_trace()
 
 #						if val_NLL_loss> 3.5:
 #							_, val_NLL_loss, smry_str = sess.run([train_op_NLL, NLL_loss, summary['NLL_loss']] )
@@ -339,7 +339,8 @@ def main(unused_argv):
 						if counter % FLAGS.log_every_n_steps==0:
 							elapsed = time.time() - start_time
 							log( epoch, batch_idx, nBatches, lossnames_to_print,
-								 [val_NLL_loss,val_g_loss,val_d_loss,val_d_acc,val_g_acc], elapsed, counter )
+								 [val_NLL_loss], elapsed, counter )
+#								 [val_NLL_loss,val_g_loss,val_d_loss,val_d_acc,val_g_acc], elapsed, counter )
 			
 						if counter % 500 == 1 or \
 							(epoch==FLAGS.number_of_steps-1 and batch_idx==nBatches-1) :
@@ -354,14 +355,14 @@ def main(unused_argv):
 								for j, caption in enumerate(captions):
 									sentence = [vocab.id_to_word(w) for w in caption.sentence[1:-1]]
 									sentence = " ".join(sentence)
-									sentence = "  {}-{}) {} (p={:.8f})".format(i,j, sentence, math.exp(caption.logprob))
+									sentence = "  {}-{}) {} (p={:.8f})".format(i+1,j+1, sentence, math.exp(caption.logprob))
 									print( sentence )
 									f_valid_text.write( sentence +'\n' )
 								# free sentence check
 							for i, caption in enumerate(val_free_sentence):
 								sentence = [vocab.id_to_word(w) for w in caption[1:-1]]
 								sentence = " ".join(sentence)
-								sentence = "  free %d) %s" % (i, sentence)
+								sentence = "  free %d) %s" % (i+1, sentence)
 								print( sentence )
 								f_valid_text.write( sentence +'\n' )
 							f_valid_text.flush()
