@@ -11,8 +11,8 @@ CHECKPOINT_PATH="${IM2TXT}/model/train"
 VOCAB_FILE="${DATASET_DIR}/mscoco/forShowAndTell/word_counts.txt"
 
 # JPEG image file to caption.
-IMAGE_FILE="${DATASET_DIR}/mscoco/val2014/COCO_val2014_000000224437.jpg"
-#IMAGE_FILE="${DATASET_DIR}/mscoco/val2014/COCO_val2014_000000224477.jpg"
+#IMAGE_FILE="${DATASET_DIR}/mscoco/val2014/COCO_val2014_000000224437.jpg"
+IMAGE_FILE="${DATASET_DIR}/mscoco/val2014/COCO_val2014_000000224477.jpg"
 #IMAGE_FILE="${DATASET_DIR}/mscoco/val2014/COCO_val2014_000000224426.jpg"
 
 # Ignore GPU devices (only necessary if your GPU is currently memory
