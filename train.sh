@@ -5,12 +5,8 @@ INCEPTION_CHECKPOINT="${IM2TXT}/model/inception_v3.ckpt"
 # Directory to save the model.
 MODEL_DIR="${IM2TXT}/model/train_sanity_check"
 
-# Build the model.
-#bazel build -c opt im2txt/...
-
-export CUDA_VISIBLE_DEVICES=0
 # Run the training script.
-#bazel-bin/im2txt/train \
+export CUDA_VISIBLE_DEVICES=0
 python im2txt/train.py \
   --input_file_pattern="${MSCOCO_DIR}/forShowAndTell/train-?????-of-00256" \
   --inception_checkpoint_file="${INCEPTION_CHECKPOINT}" \

@@ -100,9 +100,7 @@ def main(unused_argv):
 		free_state_h = tf.expand_dims( free_state_h, axis=1 )
 		
 		# get free sentence
-		free_softmax = model_free.inference_softmax
-		free_softmax_reshaped = tf.reshape( free_softmax, [-1,30,vocab_size] )
-		free_sentence = tf.argmax( free_softmax_reshaped, axis=2 )
+		free_sentence = model_free.free_sentence
 
 		# prepare behavior to be LSTM's input
 		teacher_behavior = tf.concat( [teacher_outputs,teacher_state_c,teacher_state_h], axis=1 )
@@ -131,26 +129,40 @@ def main(unused_argv):
 			gather_idx = tf.concat( [batch_range,teacher_lengths-1], axis=1 )
 			d_last_output_teacher = tf.gather_nd( d_outputs_teacher, gather_idx )
 
+			# concat inception feature
+			# d_teacher_concat = tf.concat( [d_last_output_teacher,model.image_embeddings], 1 )
+
 			# FC to get T/F logits
-			d_logits_teacher = tf.contrib.layers.fully_connected( inputs = d_last_output_teacher,
+			d_logits_teacher = tf.contrib.layers.fully_connected( inputs = d_last_output_teacher, #d_teacher_concat,
 															num_outputs = 2,
 															activation_fn = None,
 															weights_initializer = model.initializer,
 															scope = scope_disc )
-			d_accuracy_teacher = tf.reduce_mean( tf.cast( tf.argmax( d_logits_teacher, axis=1 ), tf.float32 ) )
-
 			scope_disc.reuse_variables()
+
+			# teacher with wrong image
+#			wrong_image = tf.concat(model.image_embeddings[1:-1],tf.expand_dims(model.image_embeddings[0],1),0)
+#			d_teacher_wrong_concat = tf.concat( [d_last_output_teacher,wrong_image], 1 )
+#			d_logits_teacher_wrong = tf.contrib.layers.fully_connected( inputs = d_teacher_wrong_concat,
+#															num_outputs = 2,
+#															activation_fn = None,
+#															weights_initializer = model.initializer,
+#															scope = scope_disc )
+
+
 			d_outputs_free, _ = tf.nn.dynamic_rnn( cell=d_lstm_cell,
 												inputs = free_behavior,
 												sequence_length = free_lengths,
 												dtype = tf.float32,
 												scope = scope_disc )
 			d_last_output_free = d_outputs_free[:,-1,:]
-			d_logits_free = tf.contrib.layers.fully_connected( inputs = d_last_output_free,
+			# d_free_concat = tf.concat( [d_last_output_free,model.image_embeddings], 1 )
+			d_logits_free = tf.contrib.layers.fully_connected( inputs = d_last_output_free, #d_free_concat,
 															num_outputs = 2,
 															activation_fn = None,
 															weights_initializer = model.initializer,
 															scope = scope_disc )
+			d_accuracy_teacher = tf.reduce_mean( tf.cast( tf.argmax( d_logits_teacher, axis=1 ), tf.float32 ) )
 			d_accuracy_free = tf.reduce_mean( tf.cast( 1-tf.argmax( d_logits_free, axis=1 ), tf.float32 ) )
 
 			d_accuracy = ( d_accuracy_teacher + d_accuracy_free ) /2
@@ -159,6 +171,8 @@ def main(unused_argv):
 
 		d_loss_teacher = tf.reduce_mean( tf.nn.sigmoid_cross_entropy_with_logits(name='d_loss_teacher',
 									 logits=d_logits_teacher, labels=tf.ones_like(d_logits_teacher) ) )
+#		d_loss_teacher_wrong = tf.reduce_mean( tf.nn.sigmoid_cross_entropy_with_logits(name='d_loss_teacher_wrong',
+#									 logits=d_logits_teacher_wrong, labels=tf.zeros_like(d_logits_teacher_wrong) ) )
 		d_loss_free = tf.reduce_mean( tf.nn.sigmoid_cross_entropy_with_logits(name='d_loss_free',
 									 logits=d_logits_free, labels=tf.zeros_like(d_logits_free) ) )
 		d_loss = d_loss_teacher + d_loss_free
@@ -262,7 +276,7 @@ def main(unused_argv):
 			could_load, checkpoint_counter = load( sess, saver, train_dir )
 			if could_load:
 				counter = checkpoint_counter
-			generator = caption_generator.CaptionGenerator( model_valid, vocab )
+			generator = caption_generator.CaptionGenerator( model_valid, vocab, beam_size=1 )
 
 			try:
 				# for validation
@@ -276,23 +290,21 @@ def main(unused_argv):
 				        valid_images.append( f.read() )
 					print( filename )
 			
-				# run inference for not-trained model
-				#self.valid( valid_image, f_valid_text )
-				for i, valid_image in enumerate(valid_images):
-					captions = generator.beam_search( sess, valid_image )
-					f_valid_text.write( 'initial caption (beam) {}\n'.format( str(datetime.datetime.now().time())[:-7] ) )
-					for j, caption in enumerate(captions):
-						sentence = [vocab.id_to_word(w) for w in caption.sentence[1:-1]]
-						sentence = " ".join(sentence)
-						sentence = "  {}-{}) {} (p={:.8f})".format(i+1,j+1, sentence, math.exp(caption.logprob))
-						print( sentence )
-						f_valid_text.write( sentence +'\n' )
-				f_valid_text.flush()
+#				# run inference for not-trained model
+#				for i, valid_image in enumerate(valid_images):
+#					captions = generator.beam_search( sess, valid_image )
+#					f_valid_text.write( 'initial caption (beam) {}\n'.format( str(datetime.datetime.now().time())[:-7] ) )
+#					for j, caption in enumerate(captions):
+#						sentence = [vocab.id_to_word(w) for w in caption.sentence[1:-1]]
+#						sentence = " ".join(sentence)
+#						sentence = "  {}-{}) {} (p={:.8f})".format(i+1,j+1, sentence, math.exp(caption.logprob))
+#						print( sentence )
+#						f_valid_text.write( sentence +'\n' )
+#				f_valid_text.flush()
 
 
 				# run training loop
-				# lossnames_to_print = ['NLL_loss','g_loss', 'd_loss', 'd_acc', 'g_acc']
-				lossnames_to_print = ['NLL_loss']
+				lossnames_to_print = ['NLL_loss','g_loss', 'd_loss', 'd_acc', 'g_acc']
 				val_NLL_loss = float('Inf')
 				val_g_loss = float('Inf')
 				val_d_loss = float('Inf')
@@ -305,12 +317,14 @@ def main(unused_argv):
 						is_gen_trained = False
 
 						# train NLL loss only (for im2txt sanity check)
-						_, val_NLL_loss, smry_str, val_free_sentence = sess.run(
-							[train_op_NLL, NLL_loss, summary['NLL_loss'], free_sentence ] )
+						_, val_NLL_loss, smry_str, val_free_sentence, val_teacher_sentence = \
+								sess.run( 
+									[train_op_NLL, NLL_loss, summary['NLL_loss'],free_sentence, model.input_seqs] )
 						summaryWriter.add_summary(smry_str, counter)
 
-#						if val_NLL_loss> 3.5:
-#							_, val_NLL_loss, smry_str = sess.run([train_op_NLL, NLL_loss, summary['NLL_loss']] )
+#						if val_NLL_loss> 3:
+#							_, val_NLL_loss, smry_str, val_free_sentence = sess.run(
+#   											[train_op_NLL, NLL_loss, summary['NLL_loss'], free_sentence] )
 #							summaryWriter.add_summary(smry_str, counter)
 #						else:
 #							# train discriminator
@@ -323,9 +337,9 @@ def main(unused_argv):
 #							summaryWriter.add_summary(smr4, counter)
 #
 #							# train generator
-#							_, val_g_loss, val_NLL_loss, val_g_acc, smr1, smr2, smr3 = sess.run( 
+#							_, val_g_loss, val_NLL_loss, val_g_acc, smr1, smr2, smr3, val_free_sentence = sess.run( 
 #								[train_op_gen,g_loss,NLL_loss, d_accuracy, 
-#								summary['g_loss'],summary['NLL_loss'], summary['g_and_NLL_loss']] )
+#								summary['g_loss'],summary['NLL_loss'], summary['g_and_NLL_loss'], free_sentence] )
 #							summaryWriter.add_summary(smr1, counter)
 #							summaryWriter.add_summary(smr2, counter)
 #							summaryWriter.add_summary(smr3, counter)
@@ -339,14 +353,14 @@ def main(unused_argv):
 						if counter % FLAGS.log_every_n_steps==0:
 							elapsed = time.time() - start_time
 							log( epoch, batch_idx, nBatches, lossnames_to_print,
-								 [val_NLL_loss], elapsed, counter )
-#								 [val_NLL_loss,val_g_loss,val_d_loss,val_d_acc,val_g_acc], elapsed, counter )
+								 [val_NLL_loss,val_g_loss,val_d_loss,val_d_acc,val_g_acc], elapsed, counter )
 			
 						if counter % 500 == 1 or \
 							(epoch==FLAGS.number_of_steps-1 and batch_idx==nBatches-1) :
 							saver.save( sess, filename_saved_model, global_step=counter)
-			
-						if (batch_idx+1) % (nBatches//10) == 0  or batch_idx == nBatches-1:
+
+						if True:			
+#						if (batch_idx+1) % (nBatches//10) == 0  or batch_idx == nBatches-1:
 							# run test after every epoch
 							f_valid_text.write( 'count {} epoch {} batch {}/{} ({})\n'.format( \
 									counter, epoch, batch_idx, nBatches, str(datetime.datetime.now().time())[:-7] ) )
@@ -360,9 +374,14 @@ def main(unused_argv):
 									f_valid_text.write( sentence +'\n' )
 								# free sentence check
 							for i, caption in enumerate(val_free_sentence):
-								sentence = [vocab.id_to_word(w) for w in caption[1:-1]]
+								sentence = [vocab.id_to_word(w) for w in caption]
 								sentence = " ".join(sentence)
 								sentence = "  free %d) %s" % (i+1, sentence)
+								print( sentence )
+								f_valid_text.write( sentence +'\n' )
+								sentence = [vocab.id_to_word(w) for w in val_teacher_sentence[i,1:]]
+								sentence = " ".join(sentence)
+								sentence = "  teacher %d) %s\n" % (i+1, sentence)
 								print( sentence )
 								f_valid_text.write( sentence +'\n' )
 							f_valid_text.flush()

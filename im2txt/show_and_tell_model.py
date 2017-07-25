@@ -103,7 +103,7 @@ class ShowAndTellModel(object):
 
 	def is_training(self):
 		"""Returns true if the model is built for training mode."""
-		return self.mode == "train"
+		return self.mode == "train" or self.mode == 'free'
 
 	def process_image(self, encoded_image, thread_id=0):
 		"""Decodes and processes an image string.
@@ -235,6 +235,7 @@ class ShowAndTellModel(object):
 					initializer=self.initializer)
 			seq_embeddings = tf.nn.embedding_lookup(embedding_map, self.input_seqs)
 
+		self.embedding_map = embedding_map
 		self.seq_embeddings = seq_embeddings
 
 	def build_model(self):
@@ -255,62 +256,73 @@ class ShowAndTellModel(object):
 		# modified LSTM in the "Show and Tell" paper has no biases and outputs
 		# new_c * sigmoid(o).
 		lstm_cell = tf.contrib.rnn.BasicLSTMCell(self.config.num_lstm_units)
-		if self.mode == "train":
-			lstm_cell = tf.contrib.rnn.DropoutWrapper(
-					lstm_cell,
-					input_keep_prob=self.config.lstm_dropout_keep_prob,
-					output_keep_prob=self.config.lstm_dropout_keep_prob)
+#		if self.mode == "train" or self.mode == 'free':
+#			lstm_cell = tf.contrib.rnn.DropoutWrapper(
+#					lstm_cell,
+#					input_keep_prob=self.config.lstm_dropout_keep_prob,
+#					output_keep_prob=self.config.lstm_dropout_keep_prob)
+
+		# Feed the image embeddings to set the initial LSTM state.
+		zero_state = lstm_cell.zero_state(
+				batch_size=self.image_embeddings.get_shape()[0], dtype=tf.float32)
 
 		with tf.variable_scope("lstm", initializer=self.initializer) as lstm_scope:
 			if self.reuse: lstm_scope.reuse_variables()
-			# Feed the image embeddings to set the initial LSTM state.
-			zero_state = lstm_cell.zero_state(
-					batch_size=self.image_embeddings.get_shape()[0], dtype=tf.float32)
 			_, initial_state = lstm_cell(self.image_embeddings, zero_state)
 
-			# Allow the LSTM variables to be reused.
-			lstm_scope.reuse_variables()
 
-			if self.mode == "inference":
-				# In inference mode, use concatenated states for convenient feeding and
-				# fetching.
-				self.inference_initial_state = tf.concat(axis=1, values=initial_state, name="initial_state")
+		if self.mode == "inference":
+			# In inference mode, use concatenated states for convenient feeding and
+			# fetching.
+			self.inference_initial_state = tf.concat(axis=1, values=initial_state, name="initial_state")
 
-				# Placeholder for feeding a batch of concatenated states.
-				self.inference_state_feed = tf.placeholder(dtype=tf.float32,
-															shape=[None, sum(lstm_cell.state_size)],
-															name="state_feed")
-				state_tuple = tf.split(value=self.inference_state_feed, num_or_size_splits=2, axis=1)
+			# Placeholder for feeding a batch of concatenated states.
+			self.inference_state_feed = tf.placeholder(dtype=tf.float32,
+														shape=[None, sum(lstm_cell.state_size)],
+														name="state_feed")
+			state_tuple = tf.split(value=self.inference_state_feed, num_or_size_splits=2, axis=1)
 
+			with tf.variable_scope("lstm", initializer=self.initializer) as lstm_scope:
+				# Allow the LSTM variables to be reused.
+				lstm_scope.reuse_variables()
 				# Run a single LSTM step.
 				lstm_outputs, state_tuple = lstm_cell(
 						inputs=tf.squeeze(self.seq_embeddings, axis=[1]),
 						state=state_tuple)
 
-				# Concatentate the resulting state.
-				self.inference_state_output = tf.concat(axis=1, values=state_tuple, name="state")
-			elif self.mode == "free":
-				# free
-				nSteps = 30
-				cell_outputs = []
-				cell_states = []
-				cell_output = self.seq_embeddings[:,0,:] # start_word
-				cell_state = initial_state
-				for time_step in range(nSteps):
-					cell_output, cell_state = lstm_cell( cell_output, cell_state ) 
-					cell_outputs.append(cell_output)
-				lstm_outputs = tf.stack( cell_outputs, axis=1 )
-				lstm_final_state = cell_state
-			else:
-				# Run the batch of sequence embeddings through the LSTM.
-				# teacher
-				sequence_length = tf.reduce_sum(self.input_mask, 1)
+			# Concatentate the resulting state.
+			self.inference_state_output = tf.concat(axis=1, values=state_tuple, name="state")
+		elif self.mode == "free":
+			# free
+			nSteps = 30
+			cell_outputs = []
+			cell_states = []
+			free_sentence = []
+			seq_embedding = self.seq_embeddings[:,0,:] # start_word
+			cell_state = initial_state
+			for time_step in range(nSteps):
+				cell_output, cell_state, logits, word, seq_embedding = \
+								self.free_run_step( lstm_cell, seq_embedding, cell_state )
+				cell_output, cell_state = lstm_cell( cell_output, cell_state ) 
+				cell_outputs.append( cell_output )
+				free_sentence.append( word )
+			lstm_outputs = tf.stack( cell_outputs, axis=1 )
+			free_sentence = tf.stack( free_sentence, axis=1 )
+			lstm_final_state = cell_state
+		else:
+			# Run the batch of sequence embeddings through the LSTM.
+			# teacher
+			sequence_length = tf.reduce_sum(self.input_mask, 1)
+			with tf.variable_scope("lstm", initializer=self.initializer) as lstm_scope:
+				# Allow the LSTM variables to be reused.
+				lstm_scope.reuse_variables()
 				lstm_outputs, lstm_final_state= tf.nn.dynamic_rnn(cell=lstm_cell,
-													inputs=self.seq_embeddings,
-													sequence_length=sequence_length,
-													initial_state=initial_state,
-													dtype=tf.float32,
-													scope=lstm_scope)
+												inputs=self.seq_embeddings,
+												sequence_length=sequence_length,
+												initial_state=initial_state,
+												dtype=tf.float32,
+												scope=lstm_scope)
+
 		# Stack batches vertically.
 		lstm_outputs_reshaped = tf.reshape(lstm_outputs, [-1, lstm_cell.output_size])
 
@@ -327,7 +339,8 @@ class ShowAndTellModel(object):
 			self.inference_softmax = tf.nn.softmax(logits, name="softmax")
 		elif self.mode == "free":
 			self.behavior = [lstm_outputs, lstm_final_state]
-			self.inference_softmax = tf.nn.softmax(logits, name="softmax")
+#			self.inference_softmax = tf.nn.softmax(logits, name="softmax")
+			self.free_sentence = free_sentence
 		else:
 			targets = tf.reshape(self.target_seqs, [-1])
 			weights = tf.to_float(tf.reshape(self.input_mask, [-1]))
@@ -416,3 +429,20 @@ class ShowAndTellModel(object):
 		return softmax_output, state_output, None
 
 
+	def free_run_step( self, cell, input_embedding, input_state ):
+		with tf.variable_scope("lstm", initializer=self.initializer) as lstm_scope:
+			# Allow the LSTM variables to be reused.
+			lstm_scope.reuse_variables()
+			cell_output, cell_state = cell( input_embedding, input_state )
+		with tf.variable_scope("logits") as logits_scope:
+			if self.reuse: logits_scope.reuse_variables()
+			logits = tf.contrib.layers.fully_connected(
+					inputs=cell_output,
+					num_outputs=self.config.vocab_size,
+					activation_fn=None,
+					weights_initializer=self.initializer,
+					reuse=True,
+					scope=logits_scope)
+		word = tf.argmax( logits, 1 )
+		seq_embedding = tf.nn.embedding_lookup(self.embedding_map, word)
+		return cell_output, cell_state, logits, word, seq_embedding
