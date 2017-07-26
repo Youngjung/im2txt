@@ -181,15 +181,22 @@ def main(unused_argv):
 									 logits=d_logits_free, labels=tf.ones_like(d_logits_free) ) )
 		g_and_NLL_loss = g_loss + NLL_loss
 
-		summary = {}
-		summary['NLL_loss'] = tf.summary.scalar('NLL_loss', NLL_loss)
-		summary['d_loss'] = tf.summary.scalar('d_loss', d_loss)
-		summary['d_loss_teacher'] = tf.summary.scalar('d_loss_teacher', d_loss_teacher)
-		summary['d_loss_free'] = tf.summary.scalar('d_loss_free', d_loss_free)
-		summary['g_loss'] = tf.summary.scalar('g_loss', g_loss)
-		summary['g_and_NLL_loss'] = tf.summary.scalar('g_and_NLL_loss', g_and_NLL_loss)
-		summary['d_logits_free'] = tf.summary.histogram('d_logits_free', d_logits_free)
-		summary['d_accuracy'] = tf.summary.histogram('d_accuracy', d_accuracy)
+		# tf.summary
+		summary_NLL_loss = tf.summary.scalar('NLL_loss', NLL_loss)
+
+		summary_temp_list = [ tf.summary.scalar('d_loss', d_loss) ,
+								tf.summary.scalar('d_loss_teacher', d_loss_teacher),
+								tf.summary.scalar('d_loss_free', d_loss_free),
+								tf.summary.scalar('d_accuracy', d_accuracy),
+								tf.summary.scalar('d_accuracy_teacher', d_accuracy_teacher),
+								tf.summary.scalar('d_accuracy_free', d_accuracy_free) ]
+		summary_disc = tf.summary.merge( summary_temp_list )
+
+		summary_temp_list = [ tf.summary.scalar('g_and_NLL_loss', g_and_NLL_loss),
+								summary_NLL_loss,
+								tf.summary.scalar('g_loss', g_loss),
+								tf.summary.scalar('d_accuracy_free', d_accuracy_free) ]
+		summary_gen = tf.summary.merge( summary_temp_list )
 
 		# Set up the learning rate for training ops
 		learning_rate_decay_fn = None
@@ -317,38 +324,29 @@ def main(unused_argv):
 						is_gen_trained = False
 
 						# train NLL loss only (for im2txt sanity check)
-						_, val_NLL_loss, smry_str, val_free_sentence, val_teacher_sentence = \
-								sess.run( 
-									[train_op_NLL, NLL_loss, summary['NLL_loss'],free_sentence, model.input_seqs] )
-						summaryWriter.add_summary(smry_str, counter)
+#						_, val_NLL_loss, smry, val_free_sentence, val_teacher_sentence = \
+#								sess.run( 
+#									[train_op_NLL, NLL_loss, summary_NLL_loss,free_sentence, model.input_seqs] )
+#						summaryWriter.add_summary(smry, counter)
 
-#						if val_NLL_loss> 3:
-#							_, val_NLL_loss, smry_str, val_free_sentence = sess.run(
-#   											[train_op_NLL, NLL_loss, summary['NLL_loss'], free_sentence] )
-#							summaryWriter.add_summary(smry_str, counter)
-#						else:
-#							# train discriminator
-#							_, val_d_loss, val_d_acc, \
-#							smr1, smr2, smr3, smr4 = sess.run([train_op_disc, d_loss, d_accuracy, 
-#								 summary['d_loss_teacher'], summary['d_loss_free'], summary['d_loss'],summary['d_accuracy']] )
-#							summaryWriter.add_summary(smr1, counter)
-#							summaryWriter.add_summary(smr2, counter)
-#							summaryWriter.add_summary(smr3, counter)
-#							summaryWriter.add_summary(smr4, counter)
-#
-#							# train generator
-#							_, val_g_loss, val_NLL_loss, val_g_acc, smr1, smr2, smr3, val_free_sentence = sess.run( 
-#								[train_op_gen,g_loss,NLL_loss, d_accuracy, 
-#								summary['g_loss'],summary['NLL_loss'], summary['g_and_NLL_loss'], free_sentence] )
-#							summaryWriter.add_summary(smr1, counter)
-#							summaryWriter.add_summary(smr2, counter)
-#							summaryWriter.add_summary(smr3, counter)
-#							_, val_g_loss, val_NLL_loss, val_g_acc, smr1, smr2, smr3 = sess.run( 
-#								[train_op_gen,g_loss,NLL_loss, d_accuracy, 
-#								summary['g_loss'],summary['NLL_loss'], summary['g_and_NLL_loss']] )
-#							summaryWriter.add_summary(smr1, counter)
-#							summaryWriter.add_summary(smr2, counter)
-#							summaryWriter.add_summary(smr3, counter)
+						if val_NLL_loss> 3:
+							_, val_NLL_loss, smry, val_free_sentence, val_teacher_sentence = sess.run(
+   											[train_op_NLL, NLL_loss, summary_NLL_loss, free_sentence, model.input_seqs] )
+							summaryWriter.add_summary(smry, counter)
+						else:
+							# train discriminator
+							_, val_d_loss, val_d_acc, smry = sess.run([train_op_disc, d_loss, d_accuracy, summary_disc] )
+							summaryWriter.add_summary(smry, counter)
+
+							# train generator twice
+							_, val_g_loss, val_NLL_loss, val_g_acc, smry, val_free_sentence, val_teacher_sentence = sess.run( 
+								[train_op_gen,g_loss,NLL_loss, d_accuracy, 
+								summary_gen, free_sentence, model.input_seqs] )
+							summaryWriter.add_summary(smry, counter)
+							_, val_g_loss, val_NLL_loss, val_g_acc, smry, val_free_sentence, val_teacher_sentence = sess.run( 
+								[train_op_gen,g_loss,NLL_loss, d_accuracy, 
+								summary_gen, free_sentence, model.input_seqs] )
+							summaryWriter.add_summary(smry, counter)
 			
 						if counter % FLAGS.log_every_n_steps==0:
 							elapsed = time.time() - start_time
