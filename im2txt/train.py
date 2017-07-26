@@ -359,8 +359,8 @@ def main(unused_argv):
 							(epoch==FLAGS.number_of_steps-1 and batch_idx==nBatches-1) :
 							saver.save( sess, filename_saved_model, global_step=counter)
 
-						if True:			
-#						if (batch_idx+1) % (nBatches//10) == 0  or batch_idx == nBatches-1:
+#						if True:			
+						if (batch_idx+1) % (nBatches//10) == 0  or batch_idx == nBatches-1:
 							# run test after every epoch
 							f_valid_text.write( 'count {} epoch {} batch {}/{} ({})\n'.format( \
 									counter, epoch, batch_idx, nBatches, str(datetime.datetime.now().time())[:-7] ) )
