@@ -116,7 +116,7 @@ def main(unused_argv):
 			teacher_lengths = tf.reduce_sum( model.input_mask, 1 )+2
 			free_lengths = tf.ones_like(teacher_lengths)*(30+2)
 
-			# run lstm
+			# teacher-behavior into Discriminator-LSTM
 			d_outputs_teacher, _ = tf.nn.dynamic_rnn( cell=d_lstm_cell,
 												inputs = teacher_behavior,
 												sequence_length = teacher_lengths,
@@ -130,10 +130,11 @@ def main(unused_argv):
 			d_last_output_teacher = tf.gather_nd( d_outputs_teacher, gather_idx )
 
 			# concat inception feature
-			# d_teacher_concat = tf.concat( [d_last_output_teacher,model.image_embeddings], 1 )
+			d_teacher_concat = tf.concat( [d_last_output_teacher,model.image_embeddings], 1 )
 
 			# FC to get T/F logits
-			d_logits_teacher = tf.contrib.layers.fully_connected( inputs = d_last_output_teacher, #d_teacher_concat,
+			# d_logits_teacher = tf.contrib.layers.fully_connected( inputs = d_last_output_teacher, #d_teacher_concat,
+			d_logits_teacher = tf.contrib.layers.fully_connected( inputs = d_teacher_concat,
 															num_outputs = 2,
 															activation_fn = None,
 															weights_initializer = model.initializer,
@@ -141,41 +142,44 @@ def main(unused_argv):
 			scope_disc.reuse_variables()
 
 			# teacher with wrong image
-#			wrong_image = tf.concat(model.image_embeddings[1:-1],tf.expand_dims(model.image_embeddings[0],1),0)
-#			d_teacher_wrong_concat = tf.concat( [d_last_output_teacher,wrong_image], 1 )
-#			d_logits_teacher_wrong = tf.contrib.layers.fully_connected( inputs = d_teacher_wrong_concat,
-#															num_outputs = 2,
-#															activation_fn = None,
-#															weights_initializer = model.initializer,
-#															scope = scope_disc )
+			wrong_image_embeddings = tf.concat([model.image_embeddings[1:],model.image_embeddings[0:1]],0)
+			d_teacher_wrong_concat = tf.concat( [d_last_output_teacher,wrong_image_embeddings], 1 )
+			d_logits_teacher_wrong = tf.contrib.layers.fully_connected( inputs = d_teacher_wrong_concat,
+															num_outputs = 2,
+															activation_fn = None,
+															weights_initializer = model.initializer,
+															scope = scope_disc )
 
-
+			# free-behavior into Discriminator-LSTM
 			d_outputs_free, _ = tf.nn.dynamic_rnn( cell=d_lstm_cell,
 												inputs = free_behavior,
 												sequence_length = free_lengths,
 												dtype = tf.float32,
 												scope = scope_disc )
 			d_last_output_free = d_outputs_free[:,-1,:]
-			# d_free_concat = tf.concat( [d_last_output_free,model.image_embeddings], 1 )
-			d_logits_free = tf.contrib.layers.fully_connected( inputs = d_last_output_free, #d_free_concat,
+			d_free_concat = tf.concat( [d_last_output_free,model.image_embeddings], 1 )
+			# d_logits_free = tf.contrib.layers.fully_connected( inputs = d_last_output_free, #d_free_concat,
+			d_logits_free = tf.contrib.layers.fully_connected( inputs = d_free_concat,
 															num_outputs = 2,
 															activation_fn = None,
 															weights_initializer = model.initializer,
 															scope = scope_disc )
+
 			d_accuracy_teacher = tf.reduce_mean( tf.cast( tf.argmax( d_logits_teacher, axis=1 ), tf.float32 ) )
+			d_accuracy_teacher_wrong = tf.reduce_mean( tf.cast( 1-tf.argmax( d_logits_teacher_wrong, axis=1 ), tf.float32 ) )
 			d_accuracy_free = tf.reduce_mean( tf.cast( 1-tf.argmax( d_logits_free, axis=1 ), tf.float32 ) )
 
-			d_accuracy = ( d_accuracy_teacher + d_accuracy_free ) /2
+			d_accuracy = ( d_accuracy_teacher + d_accuracy_teacher_wrong + d_accuracy_free ) /3
 
 		NLL_loss = model.total_loss
 
 		d_loss_teacher = tf.reduce_mean( tf.nn.sigmoid_cross_entropy_with_logits(name='d_loss_teacher',
 									 logits=d_logits_teacher, labels=tf.ones_like(d_logits_teacher) ) )
-#		d_loss_teacher_wrong = tf.reduce_mean( tf.nn.sigmoid_cross_entropy_with_logits(name='d_loss_teacher_wrong',
-#									 logits=d_logits_teacher_wrong, labels=tf.zeros_like(d_logits_teacher_wrong) ) )
+		d_loss_teacher_wrong = tf.reduce_mean( tf.nn.sigmoid_cross_entropy_with_logits(name='d_loss_teacher_wrong',
+									 logits=d_logits_teacher_wrong, labels=tf.zeros_like(d_logits_teacher_wrong) ) )
 		d_loss_free = tf.reduce_mean( tf.nn.sigmoid_cross_entropy_with_logits(name='d_loss_free',
 									 logits=d_logits_free, labels=tf.zeros_like(d_logits_free) ) )
-		d_loss = d_loss_teacher + d_loss_free
+		d_loss = d_loss_teacher + d_loss_teacher_wrong + d_loss_free
 
 		g_loss = tf.reduce_mean( tf.nn.sigmoid_cross_entropy_with_logits(name='g_loss',
 									 logits=d_logits_free, labels=tf.ones_like(d_logits_free) ) )
@@ -186,9 +190,11 @@ def main(unused_argv):
 
 		summary_temp_list = [ tf.summary.scalar('d_loss', d_loss) ,
 								tf.summary.scalar('d_loss_teacher', d_loss_teacher),
+								tf.summary.scalar('d_loss_teacher_wrong', d_loss_teacher_wrong),
 								tf.summary.scalar('d_loss_free', d_loss_free),
 								tf.summary.scalar('d_accuracy', d_accuracy),
 								tf.summary.scalar('d_accuracy_teacher', d_accuracy_teacher),
+								tf.summary.scalar('d_accuracy_teacher_wrong', d_accuracy_teacher_wrong),
 								tf.summary.scalar('d_accuracy_free', d_accuracy_free) ]
 		summary_disc = tf.summary.merge( summary_temp_list )
 
@@ -372,6 +378,7 @@ def main(unused_argv):
 									f_valid_text.write( sentence +'\n' )
 								# free sentence check
 							for i, caption in enumerate(val_free_sentence):
+								if i>9: break
 								sentence = [vocab.id_to_word(w) for w in caption]
 								sentence = " ".join(sentence)
 								sentence = "  free %d) %s" % (i+1, sentence)
