@@ -23,11 +23,14 @@ import os
 import time
 import datetime
 import numpy as np
-from scipy.misc import imsave
 import tensorflow as tf
 
 import configuration
 import show_and_tell_model
+
+
+
+
 from inference_utils import vocabulary, caption_generator
 
 import pdb
@@ -69,7 +72,6 @@ def main(unused_argv):
 	training_config = configuration.TrainingConfig()
 
 	vocab = vocabulary.Vocabulary( FLAGS.vocab_file )
-	vocab_size = 12000
 
 	# Build the TensorFlow graph.
 	g = tf.Graph()
